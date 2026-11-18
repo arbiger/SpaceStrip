@@ -49,6 +49,20 @@ enum Diagnostic {
     static func selfTest() -> Bool {
         setvbuf(stdout, nil, _IONBF, 0)
         let gatePasses = SpaceSwitchGate.selfTest()
+        var hover = HoverState()
+        let hoverPasses = hover.update(icon: true, panel: false, visible: false, delay: 2, now: 0) == 1
+            && hover.update(icon: false, panel: false, visible: true, delay: 2, now: 1) == 0
+            && hover.update(icon: false, panel: true, visible: true, delay: 2, now: 2) == 0
+            && hover.update(icon: false, panel: false, visible: true, delay: 2, now: 3) == 0
+            && hover.update(icon: false, panel: false, visible: true, delay: 2, now: 5) == -1
+        hover.dismissed()
+        let suppressionPasses = hover.update(icon: true, panel: false, visible: false, delay: 2, now: 6) == 0
+            && hover.update(icon: false, panel: false, visible: false, delay: 2, now: 7) == 0
+            && hover.update(icon: true, panel: false, visible: false, delay: 2, now: 8) == 1
+            && hover.update(icon: false, panel: false, visible: true, delay: 0, now: 20) == 0
+        hover.reset()
+        let resetPasses = hover.update(icon: false, panel: false, visible: true, delay: 1, now: 30) == 0
+            && hover.update(icon: false, panel: false, visible: true, delay: 1, now: 31) == -1
         let ids: [UInt64] = [10, 24, 38]
         let mappingPasses = MissionControlSpaceSwitcher.spaceIndex(spaceID: 10, orderedIDs: ids) == 0
             && MissionControlSpaceSwitcher.spaceIndex(spaceID: 24, orderedIDs: ids) == 1
@@ -121,13 +135,14 @@ enum Diagnostic {
             ) == .empty
 
         print("switch gate: \(gatePasses ? "PASS" : "FAIL")")
+        print("hover timing and suppression: \(hoverPasses && suppressionPasses && resetPasses ? "PASS" : "FAIL")")
         print("AX button mapping: \(mappingPasses ? "PASS" : "FAIL")")
         print("new desktop identification: \(creationMappingPasses ? "PASS" : "FAIL")")
         print("tile geometry: \(geometryPasses ? "PASS" : "FAIL")")
         print("add double-click: \(addClickPasses ? "PASS" : "FAIL")")
         print("snapshot permission and fallback: \(captureSourcePasses ? "PASS" : "FAIL")")
         print("live Mission Control switching is not run by --selftest")
-        return gatePasses && mappingPasses && creationMappingPasses && geometryPasses && addClickPasses && captureSourcePasses
+        return gatePasses && hoverPasses && suppressionPasses && resetPasses && mappingPasses && creationMappingPasses && geometryPasses && addClickPasses && captureSourcePasses
     }
 
     /// Writes the menu bar icon to a PNG so it can be looked at.

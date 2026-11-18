@@ -16,6 +16,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menu: NSMenu!
     private var rightClickMonitor: Any?
     private var pollTimer: Timer?
+    private var hoverTimer: Timer?
+    private var hoverState = HoverState()
+    private var hoverDelay: Int = {
+        guard let value = UserDefaults.standard.object(forKey: "hoverDelay") as? Int,
+              (0...10).contains(value) else { return 2 }
+        return value
+    }()
     private var tiles: [SpaceTile] = []
     private var displayIdentifier: String?
     private var showsThumbnails = UserDefaults.standard.object(forKey: "showScreenshots") as? Bool ?? false
@@ -48,12 +55,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setUpStatusItem()
         setUpOverlay()
         refresh()
+        if hoverDelay > 0 { hideOverlay() }
+        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateHover() }
+        }
         schedulePoll()
         observeWorkspace()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         pollTimer?.invalidate()
+        hoverTimer?.invalidate()
     }
 
     private func setUpStatusItem() {
@@ -88,6 +100,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         appearanceItem.submenu = appearanceMenu
         menu.addItem(appearanceItem)
+
+        let hoverItem = NSMenuItem(title: "Hide delay", action: nil, keyEquivalent: "")
+        let hoverMenu = NSMenu()
+        for delay in 0...10 {
+            let item = NSMenuItem(title: delay == 0 ? "Manual" : "\(delay) second\(delay == 1 ? "" : "s")", action: #selector(selectHoverDelay(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = delay
+            item.state = delay == hoverDelay ? .on : .off
+            hoverMenu.addItem(item)
+        }
+        hoverItem.submenu = hoverMenu
+        menu.addItem(hoverItem)
 
         let previewStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         previewStatus.isEnabled = false
@@ -176,6 +200,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func hideOverlay() {
         overlay.hide()
         overlayItem?.state = .off
+        hoverState.dismissed()
+    }
+
+    private func updateHover() {
+        guard !switchGate.isBusy else { return }
+        guard let button = statusItem.button, let window = button.window else { return }
+        let point = NSEvent.mouseLocation
+        let iconFrame = window.convertToScreen(button.convert(button.bounds, to: nil))
+        let action = hoverState.update(icon: iconFrame.contains(point), panel: overlay.isVisible && overlay.panel.frame.contains(point), visible: overlay.isVisible, delay: hoverDelay, now: ProcessInfo.processInfo.systemUptime)
+        if action == 1 && !tiles.isEmpty {
+            overlay.show()
+            overlayItem?.state = .on
+        } else if action == -1 {
+            hideOverlay()
+        }
+    }
+
+    @objc private func selectHoverDelay(_ sender: NSMenuItem) {
+        hoverDelay = sender.tag
+        UserDefaults.standard.set(hoverDelay, forKey: "hoverDelay")
+        sender.menu?.items.forEach { $0.state = $0 === sender ? .on : .off }
+        hoverState.reset()
     }
 
     private func updateLoginItemState() {
@@ -370,6 +416,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func switchTo(_ space: VirtualSpace) {
+        if !switchGate.isBusy && SpaceAPI.activeSpaceID() == space.id {
+            hideOverlay()
+            return
+        }
         guard let displayIdentifier else {
             if let switchStatusItem { switchStatusItem.title = "Display is unavailable. Refresh and try again." }
             return
@@ -389,6 +439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let switchStatusItem { switchStatusItem.title = "Switching desktop…" }
+        hoverState.reset()
         Task { @MainActor [weak self] in
             guard let self else { return }
             let result = await missionControlSwitcher.switchTo(
@@ -399,6 +450,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Debug.log("switch result for \(space.id): \(result)")
             switchGate.finish(token)
             handle(result)
+            if case .switched = result { hideOverlay() }
+            if case .alreadyCurrent = result { hideOverlay() }
         }
     }
 

@@ -10,7 +10,7 @@ The source package declares no third-party dependencies. Run `./build.sh` to bui
 
 ## Use
 
-Click the menu bar icon to show or hide the floating strip. Right-click it for refresh, tile appearance, floating strip, launch-at-login, permission settings, and quit options. Click a desktop tile to select it; the confirmed current desktop is highlighted. The floating panel can be dragged and closed with its cross. The **+** button asks Mission Control to add a desktop and attempts to select the uniquely detected new desktop. If creation cannot be confirmed, check Mission Control before retrying.
+Hover over the menu bar icon to reveal the floating strip. It hides two seconds after the pointer leaves both the icon and strip; returning cancels the countdown. Right-click the icon and choose **Hide delay** to select 1–10 seconds or **Manual**, which uses clicks to show and hide the strip. The choice is saved. Clicking the icon also toggles the strip in hover mode. Click a desktop tile to select it; after a successful selection (including the current desktop) the strip closes. Move off the icon and back to reveal it again. The confirmed current desktop is highlighted. Right-click for refresh, tile appearance, floating strip, launch-at-login, permission settings, and quit options. The floating panel can be dragged and closed with its cross. The **+** button asks Mission Control to add a desktop and attempts to select the uniquely detected new desktop. If creation cannot be confirmed, check Mission Control before retrying.
 
 Only **regular desktops** are shown as tiles. Full-screen app Spaces and tiled layouts are not selectable tiles, even though they are included when mapping the full Mission Control Space order. If a full-screen Space is active, no regular-desktop tile may be highlighted. The strip selects the display containing the active Space when possible, otherwise the first display with Spaces; it is not a simultaneous multi-display overview.
 
@@ -33,7 +33,7 @@ swift run SpaceStrip --dump
 swift run SpaceStrip --selftest
 ```
 
-`--dump` reports observed state; `--selftest` checks switch gating, mapping, screenshot fallback and geometry without proving a live switch or rendered-window behavior. Set `SPACESTRIP_LOG=1` for debug output. Historical `Tools/` probes are not app tests; some use guessed private APIs and can change Space state.
+`--dump` reports observed state; `--selftest` checks hover timing, switch gating, mapping, screenshot fallback and geometry without proving a live switch or rendered-window behavior. Set `SPACESTRIP_LOG=1` for debug output. Historical `Tools/` probes are not app tests; some use guessed private APIs and can change Space state.
 
 ## References and credits
 

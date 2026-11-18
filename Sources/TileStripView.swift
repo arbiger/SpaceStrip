@@ -176,7 +176,6 @@ final class TileStripView: NSView {
 
         // Switching happens on mouse up so that a double click cannot fire
         // two switches, the second of which would land on a different desktop.
-        guard !tiles[index].isCurrent else { return }
         Debug.log("tile click: index=\(index) space=\(pendingSpace.id)")
         onSelect?(pendingSpace)
     }
