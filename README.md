@@ -2,6 +2,10 @@
 
 SpaceStrip is a macOS menu bar utility for selecting regular virtual desktops from a floating strip. It was designed for a Mac controlled through Screen Sharing, where the local keyboard shortcuts may not reach the remote Mac.
 
+## Download
+
+On Apple silicon Macs, download **SpaceStrip-macOS.zip** from [GitHub Releases](https://github.com/arbiger/SpaceStrip/releases/latest), unzip it, and move **SpaceStrip.app** to Applications. The download is ad-hoc signed and is not Apple-notarized.
+
 ## Status and requirements
 
 The Swift package targets macOS 14 or later and requires a Swift 6 toolchain. It uses unsupported macOS window-server and Mission Control interfaces, which may change between macOS releases. Regular desktop switching was tried over Screen Sharing on the original Mac mini setup. The self-tests do not exercise live switching or screen capture.
@@ -10,7 +14,7 @@ The source package declares no third-party dependencies. Run `./build.sh` to bui
 
 ## Use
 
-Hover over the menu bar icon to reveal the floating strip. It hides two seconds after the pointer leaves both the icon and strip; returning cancels the countdown. Right-click the icon and choose **Hide delay** to select 1–10 seconds or **Manual**, which uses clicks to show and hide the strip. The choice is saved. Clicking the icon also toggles the strip in hover mode. Click a desktop tile to select it; after a successful selection (including the current desktop) the strip closes. Move off the icon and back to reveal it again. The confirmed current desktop is highlighted. Right-click for refresh, tile appearance, floating strip, launch-at-login, permission settings, and quit options. The floating panel can be dragged and closed with its cross. The **+** button asks Mission Control to add a desktop and attempts to select the uniquely detected new desktop. If creation cannot be confirmed, check Mission Control before retrying.
+Hover over the menu bar icon to reveal the floating strip above app windows. It hides two seconds after the pointer leaves both the icon and strip; returning cancels the countdown. Right-click the icon and choose **Hide delay** to select 1–10 seconds or **Manual**, which uses clicks to show and hide the strip. The choice is saved. Clicking the icon also toggles the strip in hover mode. Click a desktop tile to select it; after a successful selection (including the current desktop) the strip closes. Move off the icon and back to reveal it again. The confirmed current desktop is highlighted. Right-click for refresh, tile appearance, floating strip, launch-at-login, permission settings, and quit options. The floating panel can be dragged and closed with its cross. The **+** button asks Mission Control to add a desktop and attempts to select the uniquely detected new desktop. If creation cannot be confirmed, check Mission Control before retrying.
 
 Only **regular desktops** are shown as tiles. Full-screen app Spaces and tiled layouts are not selectable tiles, even though they are included when mapping the full Mission Control Space order. If a full-screen Space is active, no regular-desktop tile may be highlighted. The strip selects the display containing the active Space when possible, otherwise the first display with Spaces; it is not a simultaneous multi-display overview.
 

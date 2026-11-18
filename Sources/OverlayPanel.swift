@@ -30,7 +30,7 @@ final class OverlayController {
             defer: false
         )
         panel.isFloatingPanel = true
-        panel.level = .floating
+        panel.level = .statusBar
         panel.collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
