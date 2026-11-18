@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.swiftpm/
+build/
+*.tar.gz
+HANDOFF.md
+DEV-LOG.md
+Tools/
+docs/
+Resources/MenuBarIcon.png
