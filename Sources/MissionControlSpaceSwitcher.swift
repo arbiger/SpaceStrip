@@ -11,6 +11,33 @@ enum SpaceSwitchResult: Equatable {
     case failed(String)
 }
 
+enum SpaceSwitchMode: Int, CaseIterable {
+    case `default`, allJump, allSlide
+
+    var title: String {
+        switch self {
+        case .default: return "Mixed"
+        case .allJump: return "All Jump"
+        case .allSlide: return "All Slide"
+        }
+    }
+
+    static func stored(_ value: Any?) -> SpaceSwitchMode {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !["f", "d"].contains(String(cString: number.objCType)),
+              let raw = value as? Int, let mode = SpaceSwitchMode(rawValue: raw) else { return .allSlide }
+        return mode
+    }
+
+    func usesSlide(source: VirtualSpace.Kind, target: VirtualSpace.Kind) -> Bool {
+        switch self {
+        case .default: return source != .desktop || target != .desktop
+        case .allJump: return false
+        case .allSlide: return true
+        }
+    }
+}
+
 /// Selects the Mission Control button for a Space. Setting a private Space ID
 /// directly skips the window server's tile-layout transition, which leaves
 /// fullscreen windows composited over the desktop.
@@ -38,8 +65,9 @@ final class MissionControlSpaceSwitcher {
         orderedIDs.firstIndex(of: spaceID)
     }
 
-    static func buttonIndex(spaceID: UInt64, orderedIDs: [UInt64], buttonCount: Int) -> Int? {
-        guard orderedIDs.count == buttonCount else { return nil }
+    static func buttonIndex(spaceID: UInt64, orderedIDs: [UInt64], confirmedIDs: [UInt64], buttonCount: Int) -> Int? {
+        guard orderedIDs == confirmedIDs, orderedIDs.count == buttonCount,
+              Set(orderedIDs).count == orderedIDs.count else { return nil }
         return spaceIndex(spaceID: spaceID, orderedIDs: orderedIDs)
     }
 
@@ -49,13 +77,54 @@ final class MissionControlSpaceSwitcher {
         return added[0].id
     }
 
+    static func compositionConfirmed(targetIDs: Set<CGWindowID>, sourceIDs: Set<CGWindowID>, onScreenIDs: Set<CGWindowID>, fullscreenSource: Bool = false) -> Bool {
+        let witnesses = fullscreenSource ? targetIDs.subtracting(sourceIDs) : targetIDs
+        return !witnesses.isEmpty && !witnesses.isDisjoint(with: onScreenIDs)
+            && sourceIDs.subtracting(targetIDs).isDisjoint(with: onScreenIDs)
+            && (!fullscreenSource || sourceIDs.isDisjoint(with: onScreenIDs))
+    }
+
+    static func requiresComposition(source: VirtualSpace.Kind?, target: VirtualSpace.Kind) -> Bool {
+        source != .desktop || target != .desktop
+    }
+
+    private func visibleWindowIDs(for space: VirtualSpace, windows: [WindowInfo]) -> Set<CGWindowID> {
+        if space.kind != .desktop { return Set(space.windowIDs) }
+        return Set(windows.filter { $0.isTileCandidate && $0.spaceIDs.contains(space.id) }.map(\.id))
+    }
+
+    private func confirmComposition(target: VirtualSpace, sourceIDs: Set<CGWindowID>, fullscreenSource: Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        // This guards completion against a delayed bounce; it does not fix its cause.
+        let needsSustainedConfirmation = fullscreenSource && target.kind == .desktop
+        let monotonicDeadline = ProcessInfo.processInfo.systemUptime + 2
+        var validSince: TimeInterval?
+        while needsSustainedConfirmation ? ProcessInfo.processInfo.systemUptime < monotonicDeadline : Date() < deadline {
+            let windows = WindowCatalog.allWindows()
+            let targetIDs = visibleWindowIDs(for: target, windows: windows)
+            let onScreenIDs = Set(windows.filter(\.isOnScreen).map(\.id))
+            if Self.compositionConfirmed(targetIDs: targetIDs, sourceIDs: sourceIDs, onScreenIDs: onScreenIDs, fullscreenSource: fullscreenSource),
+               SpaceAPI.activeSpaceID() == target.id {
+                if !needsSustainedConfirmation { return true }
+                let now = ProcessInfo.processInfo.systemUptime
+                if let start = validSince, now < monotonicDeadline, now - start >= 0.65 { return true }
+                if validSince == nil { validSince = now }
+            } else {
+                validSince = nil
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
+    }
+
     func addDesktop(displayID: String) async -> SpaceSwitchResult {
         guard AXIsProcessTrusted() else { return .accessibilityRequired }
-        guard let screen = screen(for: displayID),
+        guard let screen = Self.screen(for: displayID),
               SpaceAPI.managedDisplays().contains(where: { $0.identifier == displayID }) else {
             return .failed("SpaceStrip could not match this display to Mission Control.")
         }
         var openedMissionControl = false
+        var pressed = false
         do {
             if missionControlDisplay(screen: screen) == nil {
                 try toggleMissionControl()
@@ -75,6 +144,7 @@ final class MissionControlSpaceSwitcher {
             guard let beforeDisplay = SpaceAPI.managedDisplays().first(where: { $0.identifier == displayID }),
                   !beforeDisplay.spaces.isEmpty else { throw SwitchError.mappingChanged }
             let before = Set(beforeDisplay.spaces.map(\.id))
+            pressed = true
             let actionError = AXUIElementPerformAction(addButton, kAXPressAction as CFString)
             guard actionError == .success || actionError == .cannotComplete else {
                 throw SwitchError.addPressFailed(Int32(actionError.rawValue))
@@ -90,12 +160,12 @@ final class MissionControlSpaceSwitcher {
                     guard let id = Self.newDesktopID(before: before, after: display.spaces) else {
                         throw SwitchError.addUnconfirmed
                     }
-                    let result = await switchTo(spaceID: id, displayID: displayID)
-                    if result == .alreadyCurrent, missionControlDisplay(screen: screen) != nil {
-                        try toggleMissionControl()
+                    let result = await switchTo(spaceID: id, displayID: displayID, allowCleanup: false)
+                    if result == .alreadyCurrent {
                         await waitForMissionControlToClose(displayID: displayID, screen: screen)
-                        if missionControlDisplay(screen: screen) != nil {
-                            throw SwitchError.addedButNotSelected("The new desktop is current, but Mission Control stayed open.")
+                        guard missionControlDisplay(screen: screen) == nil, SpaceAPI.activeSpaceID() == id,
+                              SpaceAPI.managedDisplays().first(where: { $0.identifier == displayID })?.currentSpaceID == id else {
+                            throw SwitchError.addedButNotSelected("The new desktop or Mission Control closure could not be confirmed.")
                         }
                     }
                     if case .failed(let message) = result {
@@ -110,7 +180,7 @@ final class MissionControlSpaceSwitcher {
             }
             throw SwitchError.addUnconfirmed
         } catch {
-            if openedMissionControl, missionControlDisplay(screen: screen) != nil {
+            if openedMissionControl, !pressed, missionControlDisplay(screen: screen) != nil {
                 try? toggleMissionControl()
             }
             return .failed(error.localizedDescription)
@@ -122,25 +192,45 @@ final class MissionControlSpaceSwitcher {
         _ = AXIsProcessTrustedWithOptions(options)
     }
 
-    func switchTo(spaceID: UInt64, displayID: String) async -> SpaceSwitchResult {
+    func switchTo(spaceID: UInt64, displayID: String, allowCleanup: Bool = true, mode: SpaceSwitchMode = .default, slideWait: Int = SpaceShortcutSwitcher.defaultWait) async -> SpaceSwitchResult {
         guard AXIsProcessTrusted() else { return .accessibilityRequired }
         guard let initialDisplay = SpaceAPI.managedDisplays().first(where: { $0.identifier == displayID }),
-              initialDisplay.spaces.contains(where: { $0.id == spaceID && $0.kind == .desktop }) else {
-            return .failed("That desktop is no longer available. Refresh the strip and try again.")
+              initialDisplay.spaces.contains(where: { $0.id == spaceID && $0.isSelectable }) else {
+            return .failed("That Space is no longer available. Refresh the strip and try again.")
         }
-        guard SpaceAPI.activeSpaceID() != spaceID else { return .alreadyCurrent }
-        guard let screen = screen(for: initialDisplay.identifier) else {
+        guard let target = initialDisplay.spaces.first(where: { $0.id == spaceID }) else {
+            return .failed("That Space is no longer available. Refresh the strip and try again.")
+        }
+        let source = initialDisplay.spaces.first { $0.id == SpaceAPI.activeSpaceID() }
+        let sourceIDs = source.map { visibleWindowIDs(for: $0, windows: WindowCatalog.allWindows()) } ?? []
+        if SpaceAPI.activeSpaceID() == spaceID {
+            return .alreadyCurrent
+        }
+        if allowCleanup {
+            guard let source else { return .failed("The current Space could not be identified on this display.") }
+            if mode.usesSlide(source: source.kind, target: target.kind) {
+                return await SpaceShortcutSwitcher.switchTo(target: spaceID, display: initialDisplay, source: source.id, waitMilliseconds: slideWait)
+            }
+        }
+        guard let screen = Self.screen(for: initialDisplay.identifier) else {
             return .failed("SpaceStrip could not match this display to Mission Control.")
         }
 
         var openedMissionControl = false
+        var pressed = false
         do {
             if missionControlDisplay(screen: screen) == nil {
                 try toggleMissionControl()
                 openedMissionControl = true
             }
 
-            guard let list = await waitForSpaceList(displayID: displayID, screen: screen) else {
+            guard await waitForSpaceList(displayID: displayID, screen: screen) != nil else {
+                throw SwitchError.missionControlUnavailable
+            }
+            // The AX controls can appear before WindowManager finishes entering Mission Control.
+            // Give the opening transition time to settle, then reacquire the controls.
+            try await Task.sleep(for: .milliseconds(550))
+            guard let list = spaceList(displayID: displayID, screen: screen) else {
                 throw SwitchError.missionControlUnavailable
             }
 
@@ -149,15 +239,17 @@ final class MissionControlSpaceSwitcher {
             guard let freshDisplay = SpaceAPI.managedDisplays().first(where: { $0.identifier == displayID }) else {
                 throw SwitchError.spaceDisappeared
             }
-            guard freshDisplay.spaces.contains(where: { $0.id == spaceID && $0.kind == .desktop }) else {
+            guard freshDisplay.spaces.contains(where: { $0.id == spaceID && $0.isSelectable }) else {
                 throw SwitchError.spaceDisappeared
             }
             let freshIDs = freshDisplay.spaces.map(\.id)
             guard let freshIndex = Self.buttonIndex(
                 spaceID: spaceID,
-                orderedIDs: freshIDs,
+                orderedIDs: initialDisplay.spaces.map(\.id),
+                confirmedIDs: freshIDs,
                 buttonCount: list.buttons.count
             ) else { throw SwitchError.mappingChanged }
+            pressed = true
             let actionError = AXUIElementPerformAction(list.buttons[freshIndex], kAXPressAction as CFString)
             // Mission Control may return cannotComplete while it is animating.
             // The active Space readback below determines whether the press took.
@@ -170,17 +262,27 @@ final class MissionControlSpaceSwitcher {
             }
 
             await waitForMissionControlToClose(displayID: displayID, screen: screen)
-            if missionControlDisplay(screen: screen) != nil {
-                try? toggleMissionControl()
-                await waitForMissionControlToClose(displayID: displayID, screen: screen)
-            }
+            // AXPress owns the transition. A second toggle can interrupt it.
             if missionControlDisplay(screen: screen) != nil {
                 throw SwitchError.missionControlDidNotClose
             }
 
+            if Self.requiresComposition(source: source?.kind, target: target.kind) {
+                guard source != nil, (source?.kind == .desktop || !sourceIDs.isEmpty),
+                      await confirmComposition(target: target, sourceIDs: sourceIDs, fullscreenSource: source?.kind != .desktop) else {
+                    throw SwitchError.compositionUnconfirmed
+                }
+            } else {
+                guard SpaceAPI.activeSpaceID() == spaceID,
+                      SpaceAPI.managedDisplays().first(where: { $0.identifier == displayID })?.currentSpaceID == spaceID else {
+                    throw SwitchError.switchTimedOut
+                }
+            }
+
             return .switched
         } catch {
-            if openedMissionControl, SpaceAPI.activeSpaceID() != spaceID {
+            if allowCleanup, openedMissionControl, !pressed,
+               missionControlDisplay(screen: screen) != nil {
                 try? toggleMissionControl()
             }
             return .failed(error.localizedDescription)
@@ -242,7 +344,7 @@ final class MissionControlSpaceSwitcher {
         return SpaceList(buttons: buttons)
     }
 
-    private func screen(for displayIdentifier: String) -> NSScreen? {
+    static func screen(for displayIdentifier: String) -> NSScreen? {
         for screen in NSScreen.screens {
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
                   let uuid = CGDisplayCreateUUIDFromDisplayID(number.uint32Value)?.takeRetainedValue(),
@@ -344,6 +446,7 @@ final class MissionControlSpaceSwitcher {
         case missionControlToggleFailed(Int32)
         case switchTimedOut
         case missionControlDidNotClose
+        case compositionUnconfirmed
         case addUnavailable
         case addPressFailed(Int32)
         case addUnconfirmed
@@ -365,6 +468,8 @@ final class MissionControlSpaceSwitcher {
                 return "Mission Control did not switch to the selected desktop."
             case .missionControlDidNotClose:
                 return "The Space changed, but Mission Control stayed open. Close it and try again."
+            case .compositionUnconfirmed:
+                return "The Space ID changed, but the visible windows could not be confirmed. Check the screen before retrying."
             case .addUnavailable:
                 return "Mission Control's Add Desktop control is unavailable. Check Accessibility permission and desktop limits."
             case let .addPressFailed(code):

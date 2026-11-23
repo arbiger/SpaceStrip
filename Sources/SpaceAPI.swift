@@ -25,7 +25,11 @@ struct VirtualSpace: Hashable {
     /// Window IDs reported by the tiled layout manager, if this is a tile.
     let windowIDs: [CGWindowID]
 
-    var isTiledLayout: Bool { kind == .tiledLayout }
+    var isTiledLayout: Bool { kind == .tiledLayout && !windowIDs.isEmpty }
+    var isSelectable: Bool { kind == .desktop || kind == .fullScreenApp || isTiledLayout }
+    func isVisible(showFullscreen: Bool) -> Bool {
+        kind == .desktop || (showFullscreen && isSelectable)
+    }
 }
 
 /// A display and the spaces that live on it, in Mission Control order.
@@ -65,7 +69,7 @@ enum SpaceAPI {
                     .flatMap { UInt32(exactly: $0) }
                     .map { [$0] } ?? []
                 var seenWindowIDs: Set<CGWindowID> = []
-                let windowIDs = (tileWindowIDs + fullscreenWindowIDs).filter {
+                let windowIDs = (type == VirtualSpace.Kind.tiledLayout.rawValue ? tileWindowIDs : fullscreenWindowIDs).filter {
                     $0 != 0 && seenWindowIDs.insert($0).inserted
                 }
                 return VirtualSpace(

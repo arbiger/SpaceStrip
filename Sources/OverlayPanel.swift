@@ -16,6 +16,7 @@ final class OverlayController {
     private let stripView = TileStripView()
     private var movedByUser = false
     private var visible = true
+    private var suspended = false
     private var expectedProgrammaticOrigin: NSPoint?
 
     /// Called when the strip's close button is clicked.
@@ -65,17 +66,27 @@ final class OverlayController {
         }
     }
 
-    func update(tiles: [SpaceTile], layout: TileStripLayout) {
+    static func usableFrame(screenFrame: NSRect, visibleFrame: NSRect, menuHeight: CGFloat, safeTop: CGFloat) -> NSRect {
+        let top = min(visibleFrame.maxY, screenFrame.maxY - max(menuHeight, safeTop, 0))
+        return NSRect(x: visibleFrame.minX, y: visibleFrame.minY, width: visibleFrame.width,
+                      height: max(0, top - visibleFrame.minY))
+    }
+
+    func update(tiles: [SpaceTile], layout: TileStripLayout, screen: NSScreen?) {
         stripView.layout = layout
         stripView.tiles = tiles
+        guard !suspended else { return }
 
         let size = NSSize(
             width: layout.width(forTileCount: tiles.count),
             height: layout.height()
         )
-        let visibleFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
-            ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
-        let preferred = movedByUser ? panel.frame.origin : defaultOrigin(for: size)
+        let fallback = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let visibleFrame = Self.usableFrame(screenFrame: screen?.frame ?? fallback,
+                                            visibleFrame: screen?.visibleFrame ?? fallback,
+                                            menuHeight: NSStatusBar.system.thickness,
+                                            safeTop: screen?.safeAreaInsets.top ?? 0)
+        let preferred = movedByUser ? panel.frame.origin : NSPoint(x: visibleFrame.maxX - size.width - 12, y: visibleFrame.maxY - size.height - 10)
         let maxX = max(visibleFrame.minX, visibleFrame.maxX - size.width)
         let maxY = max(visibleFrame.minY, visibleFrame.maxY - size.height)
         let origin = NSPoint(
@@ -96,22 +107,23 @@ final class OverlayController {
 
     func hide() {
         visible = false
-        panel.orderOut(nil)
+        if !suspended { panel.orderOut(nil) }
     }
 
     func show() {
         visible = true
-        panel.orderFrontRegardless()
+        if !suspended { panel.orderFrontRegardless() }
+    }
+
+    func suspend() {
+        suspended = true
+        panel.orderOut(nil)
+    }
+
+    func resume() {
+        suspended = false
     }
 
     var isVisible: Bool { panel.isVisible }
 
-    private func defaultOrigin(for size: NSSize) -> NSPoint {
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        let frame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
-        return NSPoint(
-            x: frame.maxX - size.width - 12,
-            y: frame.maxY - size.height - 10
-        )
-    }
 }

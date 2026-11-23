@@ -26,6 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tiles: [SpaceTile] = []
     private var displayIdentifier: String?
     private var showsThumbnails = UserDefaults.standard.object(forKey: "showScreenshots") as? Bool ?? false
+    private var inFullscreenSpace = false
+    private var showsFullscreen = UserDefaults.standard.bool(forKey: "showFullscreenSpaces")
+    private var switchMode = SpaceSwitchMode.stored(UserDefaults.standard.object(forKey: "switchMode"))
+    private var slideWait = SpaceShortcutSwitcher.storedWait(UserDefaults.standard.object(forKey: "slideWait"))
     private var scannedWindows: [UInt64: [WindowInfo]] = [:]
     private var lastWindowScan = Date.distantPast
     private var lastObservedActiveSpaceID: UInt64?
@@ -55,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setUpStatusItem()
         setUpOverlay()
         refresh()
-        if hoverDelay > 0 { hideOverlay() }
+        if hoverDelay > 0 && !inFullscreenSpace { hideOverlay() }
         hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.updateHover() }
         }
@@ -100,6 +104,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         appearanceItem.submenu = appearanceMenu
         menu.addItem(appearanceItem)
+
+        let fullscreenItem = NSMenuItem(title: "Show fullscreen Spaces", action: #selector(toggleFullscreenSpaces(_:)), keyEquivalent: "")
+        fullscreenItem.target = self
+        fullscreenItem.state = showsFullscreen ? .on : .off
+        menu.addItem(fullscreenItem)
+
+        let modeItem = NSMenuItem(title: "Switching mode", action: nil, keyEquivalent: "")
+        let modeMenu = NSMenu()
+        for mode in SpaceSwitchMode.allCases {
+            let item = NSMenuItem(title: mode.title, action: #selector(selectSwitchMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = mode.rawValue
+            item.state = mode == switchMode ? .on : .off
+            modeMenu.addItem(item)
+        }
+        modeItem.submenu = modeMenu
+        menu.addItem(modeItem)
+
+        let waitItem = NSMenuItem(title: "Slide wait", action: nil, keyEquivalent: "")
+        let waitMenu = NSMenu()
+        for milliseconds in SpaceShortcutSwitcher.waitOptions {
+            let item = NSMenuItem(title: "\(milliseconds) ms", action: #selector(selectSlideWait(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = milliseconds
+            item.state = milliseconds == slideWait ? .on : .off
+            waitMenu.addItem(item)
+        }
+        waitItem.submenu = waitMenu
+        menu.addItem(waitItem)
 
         let hoverItem = NSMenuItem(title: "Hide delay", action: nil, keyEquivalent: "")
         let hoverMenu = NSMenu()
@@ -174,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rightClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
             guard let self, let button = self.statusItem.button else { return event }
             guard event.window === button.window else { return event }
+            guard !self.switchGate.isBusy else { return nil }
 
             let point = button.convert(event.locationInWindow, from: nil)
             guard point.x >= 0, point.x <= button.bounds.width else { return event }
@@ -198,13 +232,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func hideOverlay() {
+        guard !switchGate.isBusy else { return }
         overlay.hide()
         overlayItem?.state = .off
         hoverState.dismissed()
     }
 
     private func updateHover() {
-        guard !switchGate.isBusy else { return }
+        guard !switchGate.isBusy, !inFullscreenSpace else { return }
         guard let button = statusItem.button, let window = button.window else { return }
         let point = NSEvent.mouseLocation
         let iconFrame = window.convertToScreen(button.convert(button.bounds, to: nil))
@@ -218,10 +253,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func selectHoverDelay(_ sender: NSMenuItem) {
+        guard !switchGate.isBusy else { return }
         hoverDelay = sender.tag
         UserDefaults.standard.set(hoverDelay, forKey: "hoverDelay")
         sender.menu?.items.forEach { $0.state = $0 === sender ? .on : .off }
         hoverState.reset()
+    }
+
+    @objc private func selectSwitchMode(_ sender: NSMenuItem) {
+        guard !switchGate.isBusy, let mode = SpaceSwitchMode(rawValue: sender.tag) else { return }
+        switchMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "switchMode")
+        sender.menu?.items.forEach { $0.state = $0 === sender ? .on : .off }
+    }
+
+    @objc private func selectSlideWait(_ sender: NSMenuItem) {
+        guard !switchGate.isBusy, SpaceShortcutSwitcher.waitOptions.contains(sender.tag) else { return }
+        slideWait = sender.tag
+        UserDefaults.standard.set(slideWait, forKey: "slideWait")
+        sender.menu?.items.forEach { $0.state = $0 === sender ? .on : .off }
     }
 
     private func updateLoginItemState() {
@@ -262,11 +312,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Refresh
 
     private func refresh() {
+        guard !switchGate.isBusy else { return }
         updatePermissionMenuItems()
         let displays = SpaceAPI.managedDisplays()
         let activeSpace = SpaceAPI.activeSpaceID()
 
-        if lastObservedActiveSpaceID != activeSpace {
+        let activeSpaceChanged = lastObservedActiveSpaceID != activeSpace
+        if activeSpaceChanged {
             lastObservedActiveSpaceID = activeSpace
             lastWindowScan = .distantPast
             ThumbnailService.shared.invalidate(spaceID: activeSpace)
@@ -280,13 +332,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updateButton()
             return
         }
+        let wasInFullscreen = inFullscreenSpace
+        inFullscreenSpace = showsFullscreen && chosen.spaces.contains {
+            $0.id == activeSpace && $0.kind != .desktop && $0.isSelectable
+        }
         displayIdentifier = chosen.identifier
 
         let grouped = windowIndex()
         let screenBounds = NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1920, height: 1080)
 
         var newTiles: [SpaceTile] = []
-        for space in chosen.spaces where space.kind == .desktop {
+        for space in chosen.spaces where space.isVisible(showFullscreen: showsFullscreen) {
             let window = WindowCatalog.representativeWindow(
                 in: grouped[space.id] ?? [],
                 screenBounds: screenBounds
@@ -306,8 +362,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let changed = newTiles.map { "\($0.space.id)" } != tiles.map { "\($0.space.id)" }
         tiles = newTiles
         updateButton()
-        overlay.update(tiles: newTiles, layout: overlayLayout)
+        overlay.update(tiles: newTiles, layout: overlayLayout,
+                       screen: MissionControlSpaceSwitcher.screen(for: chosen.identifier) ?? NSScreen.main ?? NSScreen.screens.first)
 
+        if inFullscreenSpace && (activeSpaceChanged || !wasInFullscreen) {
+            hoverState.reset()
+            overlay.show()
+            overlayItem?.state = .on
+        } else if wasInFullscreen && !inFullscreenSpace {
+            hoverState.reset()
+        }
         if changed { ThumbnailService.shared.invalidate() }
     }
 
@@ -324,6 +388,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func thumbnail(for space: VirtualSpace, window: WindowInfo?, isCurrent: Bool) -> NSImage? {
         let service = ThumbnailService.shared
+        if space.kind != .desktop {
+            let matchingWindow = space.windowIDs.lazy.compactMap { id in
+                self.scannedWindows.values.lazy.flatMap { $0 }.first { $0.id == id }
+            }.first
+            guard let pid = matchingWindow?.ownerPID ?? space.ownerPID else { return nil }
+            return service.icon(for: pid)
+        }
         let windowID = space.windowIDs.first ?? window?.id
 
         let source = ThumbnailService.source(
@@ -383,21 +454,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func addDesktop() {
+        guard !switchGate.isBusy else { return }
         guard let displayIdentifier else {
             switchStatusItem?.title = "Display is unavailable. Refresh and try again."
             return
         }
-        guard let token = switchGate.begin() else {
-            switchStatusItem?.title = "A desktop operation is already in progress."
-            return
-        }
-        switchStatusItem?.title = "Adding desktop…"
+        guard let token = switchGate.begin() else { return }
+        overlay.suspend()
         Task { @MainActor [weak self] in
             guard let self else { return }
             let result = await missionControlSwitcher.addDesktop(displayID: displayIdentifier)
             guard switchGate.isActive(token) else { return }
             switchGate.finish(token)
             handle(result)
+            overlay.resume()
+            refresh()
         }
     }
 
@@ -416,7 +487,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func switchTo(_ space: VirtualSpace) {
-        if !switchGate.isBusy && SpaceAPI.activeSpaceID() == space.id {
+        guard !switchGate.isBusy else { return }
+        if SpaceAPI.activeSpaceID() == space.id {
             hideOverlay()
             return
         }
@@ -438,20 +510,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if let switchStatusItem { switchStatusItem.title = "Switching desktop…" }
-        hoverState.reset()
+        let selectedMode = switchMode
+        let selectedWait = slideWait
+        overlay.suspend()
         Task { @MainActor [weak self] in
             guard let self else { return }
             let result = await missionControlSwitcher.switchTo(
                 spaceID: space.id,
-                displayID: display.identifier
+                displayID: display.identifier,
+                mode: selectedMode,
+                slideWait: selectedWait
             )
             guard switchGate.isActive(token) else { return }
             Debug.log("switch result for \(space.id): \(result)")
             switchGate.finish(token)
             handle(result)
-            if case .switched = result { hideOverlay() }
-            if case .alreadyCurrent = result { hideOverlay() }
+            if hoverDelay > 0 && !inFullscreenSpace {
+                if result == .switched || result == .alreadyCurrent { hideOverlay() }
+            }
+            overlay.resume()
+            refresh()
         }
     }
 
@@ -463,11 +541,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refreshNow() {
+        guard !switchGate.isBusy else { return }
         ThumbnailService.shared.invalidate()
         refresh()
     }
 
+    @objc private func toggleFullscreenSpaces(_ sender: NSMenuItem) {
+        guard !switchGate.isBusy else { return }
+        showsFullscreen.toggle()
+        UserDefaults.standard.set(showsFullscreen, forKey: "showFullscreenSpaces")
+        sender.state = showsFullscreen ? .on : .off
+        refresh()
+    }
+
     @objc private func selectTileAppearance(_ sender: NSMenuItem) {
+        guard !switchGate.isBusy else { return }
         showsThumbnails = sender.tag == 1
         UserDefaults.standard.set(showsThumbnails, forKey: "showScreenshots")
         screenshotStyleItem?.state = showsThumbnails ? .on : .off
@@ -477,6 +565,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleOverlay() {
+        guard !switchGate.isBusy else { return }
         if overlay.isVisible {
             hideOverlay()
         } else {
