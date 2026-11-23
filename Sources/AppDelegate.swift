@@ -83,7 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.toolTip = "SpaceStrip - click to show or hide the desktop strip"
 
         menu = NSMenu()
-        let header = NSMenuItem(title: "SpaceStrip", action: nil, keyEquivalent: "")
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let title = version.map { "SpaceStrip \($0)" } ?? "SpaceStrip"
+        let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(.separator())
